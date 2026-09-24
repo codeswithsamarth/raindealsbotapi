@@ -3,11 +3,10 @@
 Runs:
 - Telegram bot polling
 - Delivery bot polling
-- Deposit checker
 - Public reseller API
 
-Start:
-    python render_api.py
+Render start command:
+uvicorn render_api:app --host 0.0.0.0 --port $PORT
 """
 
 from __future__ import annotations
@@ -24,12 +23,7 @@ from fastapi.responses import JSONResponse
 from api.reseller_v1 import router as reseller_router
 from bot_app import bot, dp
 from delivery_bot_app import delivery_bot, delivery_dp
-from services.deposit_checker import deposit_checker_loop
 
-
-# ============================================================
-# LOGGING
-# ============================================================
 
 logging.basicConfig(
     level=logging.INFO,
@@ -38,38 +32,18 @@ logging.basicConfig(
 
 logger = logging.getLogger("render_api")
 
-
-# ============================================================
-# ENVIRONMENT
-# ============================================================
-
 PORT = int(os.getenv("PORT", "10000"))
 
-INTERNAL_SECRET = os.getenv("INTERNAL_API_SECRET", "").strip()
-
-if not INTERNAL_SECRET:
-    logger.warning(
-        "INTERNAL_API_SECRET is not configured. "
-        "The reseller API will reject requests."
-    )
-
-
-# ============================================================
-# APPLICATION LIFESPAN
-# ============================================================
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    deposit_task: asyncio.Task | None = None
     polling_task: asyncio.Task | None = None
     delivery_polling_task: asyncio.Task | None = None
 
     try:
-        # ----------------------------------------------------
-        # Telegram main bot
-        # ----------------------------------------------------
-
-        await bot.delete_webhook(drop_pending_updates=True)
+        await bot.delete_webhook(
+            drop_pending_updates=True
+        )
 
         me = await bot.get_me()
 
@@ -77,19 +51,6 @@ async def lifespan(app: FastAPI):
             "Main Telegram bot connected: @%s",
             me.username,
         )
-
-        # ----------------------------------------------------
-        # Deposit checker
-        # ----------------------------------------------------
-
-        deposit_task = asyncio.create_task(
-            deposit_checker_loop(),
-            name="deposit-checker",
-        )
-
-        # ----------------------------------------------------
-        # Main Telegram polling
-        # ----------------------------------------------------
 
         polling_task = asyncio.create_task(
             dp.start_polling(
@@ -100,12 +61,7 @@ async def lifespan(app: FastAPI):
             name="telegram-polling",
         )
 
-        # ----------------------------------------------------
-        # Delivery bot
-        # ----------------------------------------------------
-
         if delivery_bot and delivery_dp:
-
             await delivery_bot.delete_webhook(
                 drop_pending_updates=False
             )
@@ -120,23 +76,21 @@ async def lifespan(app: FastAPI):
             )
 
             logger.info(
-                "Separate manual Delivery Bot started"
+                "Manual delivery bot started"
             )
 
         logger.info(
-            "FastAPI reseller API + Telegram services started"
+            "FastAPI API and Telegram bots started"
         )
 
         yield
 
     finally:
-
         logger.info("Shutting down services...")
 
         tasks = (
             delivery_polling_task,
             polling_task,
-            deposit_task,
         )
 
         for task in tasks:
@@ -148,7 +102,7 @@ async def lifespan(app: FastAPI):
                 with suppress(asyncio.CancelledError):
                     await task
 
-        if bot.session:
+        if bot and bot.session:
             await bot.session.close()
 
         if delivery_bot and delivery_bot.session:
@@ -156,10 +110,6 @@ async def lifespan(app: FastAPI):
 
         logger.info("Shutdown complete")
 
-
-# ============================================================
-# FASTAPI
-# ============================================================
 
 app = FastAPI(
     title="Rain Reseller API",
@@ -171,13 +121,8 @@ app = FastAPI(
 )
 
 
-# ============================================================
-# REQUEST LOGGING
-# ============================================================
-
 @app.middleware("http")
 async def request_logger(request: Request, call_next):
-
     logger.info(
         "%s %s",
         request.method,
@@ -212,10 +157,6 @@ async def request_logger(request: Request, call_next):
         )
 
 
-# ============================================================
-# HEALTH
-# ============================================================
-
 @app.get("/")
 async def root():
     return {
@@ -233,33 +174,12 @@ async def health():
     }
 
 
-# ============================================================
-# RESELLER API
-# ============================================================
-
-# IMPORTANT:
-#
-# This is now PUBLIC.
-#
-# There is no:
-#
-#     /internal/v1
-#
-# bridge anymore.
-#
-# Wasmer/external clients can call the API directly.
-#
 app.include_router(
     reseller_router,
 )
 
 
-# ============================================================
-# START SERVER
-# ============================================================
-
 if __name__ == "__main__":
-
     logger.info(
         "Starting server on 0.0.0.0:%s",
         PORT,
