@@ -4,6 +4,7 @@ Runs:
 - Telegram bot polling
 - Delivery bot polling
 - Public reseller API
+- Documentation UI at /docs
 
 Render start command:
 uvicorn render_api:app --host 0.0.0.0 --port $PORT
@@ -15,15 +16,20 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
 
 from api.reseller_v1 import router as reseller_router
 from bot_app import bot, dp
 from delivery_bot_app import delivery_bot, delivery_dp
 
+
+# ============================================================
+# LOGGING
+# ============================================================
 
 logging.basicConfig(
     level=logging.INFO,
@@ -32,8 +38,23 @@ logging.basicConfig(
 
 logger = logging.getLogger("render_api")
 
+
+# ============================================================
+# ENVIRONMENT
+# ============================================================
+
 PORT = int(os.getenv("PORT", "10000"))
 
+BASE_DIR = Path(__file__).resolve().parent
+
+# Put your full HTML UI here:
+# static/docs/index.html
+DOCS_FILE = BASE_DIR / "static" / "docs" / "index.html"
+
+
+# ============================================================
+# APPLICATION LIFESPAN
+# ============================================================
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -41,6 +62,8 @@ async def lifespan(app: FastAPI):
     delivery_polling_task: asyncio.Task | None = None
 
     try:
+        # Main Telegram bot
+
         await bot.delete_webhook(
             drop_pending_updates=True
         )
@@ -52,6 +75,8 @@ async def lifespan(app: FastAPI):
             me.username,
         )
 
+        # Main Telegram bot polling
+
         polling_task = asyncio.create_task(
             dp.start_polling(
                 bot,
@@ -60,6 +85,8 @@ async def lifespan(app: FastAPI):
             ),
             name="telegram-polling",
         )
+
+        # Delivery bot polling
 
         if delivery_bot and delivery_dp:
             await delivery_bot.delete_webhook(
@@ -111,6 +138,10 @@ async def lifespan(app: FastAPI):
         logger.info("Shutdown complete")
 
 
+# ============================================================
+# FASTAPI
+# ============================================================
+
 app = FastAPI(
     title="Rain Reseller API",
     version="1.0.0",
@@ -120,6 +151,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+
+# ============================================================
+# REQUEST LOGGING
+# ============================================================
 
 @app.middleware("http")
 async def request_logger(request: Request, call_next):
@@ -157,6 +192,10 @@ async def request_logger(request: Request, call_next):
         )
 
 
+# ============================================================
+# HEALTH
+# ============================================================
+
 @app.get("/")
 async def root():
     return {
@@ -174,10 +213,39 @@ async def health():
     }
 
 
+# ============================================================
+# DOCUMENTATION UI
+# ============================================================
+
+@app.get("/docs", include_in_schema=False)
+async def api_docs_page():
+    if not DOCS_FILE.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "Documentation UI file missing. "
+                "Create static/docs/index.html."
+            ),
+        )
+
+    return FileResponse(
+        DOCS_FILE,
+        media_type="text/html",
+    )
+
+
+# ============================================================
+# RESELLER API
+# ============================================================
+
 app.include_router(
     reseller_router,
 )
 
+
+# ============================================================
+# START SERVER
+# ============================================================
 
 if __name__ == "__main__":
     logger.info(
