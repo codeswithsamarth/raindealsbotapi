@@ -4,10 +4,9 @@ Runs:
 - Telegram bot polling
 - Delivery bot polling
 - Public reseller API
-- Documentation UI at /docs
 
-Render start command:
-uvicorn render_api:app --host 0.0.0.0 --port $PORT
+Start:
+    python render_api.py
 """
 
 from __future__ import annotations
@@ -16,11 +15,10 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager, suppress
-from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from api.reseller_v1 import router as reseller_router
 from bot_app import bot, dp
@@ -45,11 +43,13 @@ logger = logging.getLogger("render_api")
 
 PORT = int(os.getenv("PORT", "10000"))
 
-BASE_DIR = Path(__file__).resolve().parent
+INTERNAL_SECRET = os.getenv("INTERNAL_API_SECRET", "").strip()
 
-# Put your full HTML UI here:
-# static/docs/index.html
-DOCS_FILE = BASE_DIR / "static" / "docs" / "index.html"
+if not INTERNAL_SECRET:
+    logger.warning(
+        "INTERNAL_API_SECRET is not configured. "
+        "The reseller API will reject requests."
+    )
 
 
 # ============================================================
@@ -62,11 +62,11 @@ async def lifespan(app: FastAPI):
     delivery_polling_task: asyncio.Task | None = None
 
     try:
-        # Main Telegram bot
+        # ----------------------------------------------------
+        # Telegram main bot
+        # ----------------------------------------------------
 
-        await bot.delete_webhook(
-            drop_pending_updates=True
-        )
+        await bot.delete_webhook(drop_pending_updates=True)
 
         me = await bot.get_me()
 
@@ -75,7 +75,9 @@ async def lifespan(app: FastAPI):
             me.username,
         )
 
-        # Main Telegram bot polling
+        # ----------------------------------------------------
+        # Main Telegram polling
+        # ----------------------------------------------------
 
         polling_task = asyncio.create_task(
             dp.start_polling(
@@ -86,9 +88,12 @@ async def lifespan(app: FastAPI):
             name="telegram-polling",
         )
 
-        # Delivery bot polling
+        # ----------------------------------------------------
+        # Delivery bot
+        # ----------------------------------------------------
 
         if delivery_bot and delivery_dp:
+
             await delivery_bot.delete_webhook(
                 drop_pending_updates=False
             )
@@ -103,16 +108,17 @@ async def lifespan(app: FastAPI):
             )
 
             logger.info(
-                "Manual delivery bot started"
+                "Separate manual Delivery Bot started"
             )
 
         logger.info(
-            "FastAPI API and Telegram bots started"
+            "FastAPI reseller API + Telegram services started"
         )
 
         yield
 
     finally:
+
         logger.info("Shutting down services...")
 
         tasks = (
@@ -129,7 +135,7 @@ async def lifespan(app: FastAPI):
                 with suppress(asyncio.CancelledError):
                     await task
 
-        if bot and bot.session:
+        if bot.session:
             await bot.session.close()
 
         if delivery_bot and delivery_bot.session:
@@ -158,6 +164,7 @@ app = FastAPI(
 
 @app.middleware("http")
 async def request_logger(request: Request, call_next):
+
     logger.info(
         "%s %s",
         request.method,
@@ -214,30 +221,21 @@ async def health():
 
 
 # ============================================================
-# DOCUMENTATION UI
-# ============================================================
-
-@app.get("/docs", include_in_schema=False)
-async def api_docs_page():
-    if not DOCS_FILE.is_file():
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                "Documentation UI file missing. "
-                "Create static/docs/index.html."
-            ),
-        )
-
-    return FileResponse(
-        DOCS_FILE,
-        media_type="text/html",
-    )
-
-
-# ============================================================
 # RESELLER API
 # ============================================================
 
+# IMPORTANT:
+#
+# This is now PUBLIC.
+#
+# There is no:
+#
+#     /internal/v1
+#
+# bridge anymore.
+#
+# Wasmer/external clients can call the API directly.
+#
 app.include_router(
     reseller_router,
 )
@@ -248,6 +246,7 @@ app.include_router(
 # ============================================================
 
 if __name__ == "__main__":
+
     logger.info(
         "Starting server on 0.0.0.0:%s",
         PORT,
