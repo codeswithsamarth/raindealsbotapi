@@ -21,8 +21,7 @@ DELIVERY_BOT_TOKEN = os.getenv("DELIVERY_BOT_TOKEN", "")
 
 ADMIN_IDS = [
     1316577060,
-    7943742895,
-    5327735171
+    7943742895
 ]
 
 CHANNEL_LINK = "https://t.me/RainOrdersGroup"
@@ -31,6 +30,32 @@ TOS_LINK = "https://your-site.com/tos"
 
 GROUP_ID = -1003541834339
 GROUP_NOTIFICATIONS = True
+
+# Notification channels. A bot must be an administrator with permission to
+# post messages in each channel. Public @usernames work without a numeric ID.
+ORDER_NOTIFICATION_CHANNEL_ID = os.getenv(
+    "ORDER_NOTIFICATION_CHANNEL_ID",
+    "@RainOrdersGroup",
+)
+STOCK_NOTIFICATION_CHANNEL_ID = os.getenv(
+    "STOCK_NOTIFICATION_CHANNEL_ID",
+    "@RainStockGroup",
+)
+# Dedicated admin order-alert group.  This can be a public @username or a
+# private group ID such as -1001234567890.  New orders are read from the
+# database and sent here once; stock updates are never sent here.
+# NOTIFICATION_CHANNEL_ID remains the fallback so existing deployments do not
+# need an immediate environment-variable change.
+ADMIN_ORDER_NOTIFICATION_CHANNEL_ID = os.getenv(
+    "ADMIN_ORDER_NOTIFICATION_CHANNEL_ID",
+    os.getenv("NOTIFICATION_CHANNEL_ID", "@RainNotify"),
+)
+
+# Cancelled-deposit alerts use this same admin group unless disabled.
+NOTIFICATION_CHANNEL_ID = os.getenv("NOTIFICATION_CHANNEL_ID", "@RainNotify")
+ADMIN_ORDER_NOTIFICATION_POLL_SECONDS = max(
+    3, int(os.getenv("ADMIN_ORDER_NOTIFICATION_POLL_SECONDS", "5"))
+)
 
 
 # ==========================================================
@@ -64,15 +89,12 @@ API_KEY_ENCRYPTION_KEY = os.getenv("API_KEY_ENCRYPTION_KEY", "")
 # here, because it is an internal bridge only.
 API_BASE_URL = os.getenv("API_BASE_URL", "").rstrip("/")
 API_RATE_LIMIT_PER_SECOND = max(1, int(os.getenv("API_RATE_LIMIT_PER_SECOND", "3")))
-
-# Per-user/API-key abuse protection
+# Limits are applied per active customer API key. They can be tightened at
+# deployment time without a code change if a customer abuses their key.
 API_RATE_LIMIT_PER_MINUTE = max(1, int(os.getenv("API_RATE_LIMIT_PER_MINUTE", "120")))
 API_ORDER_LIMIT_PER_MINUTE = max(1, int(os.getenv("API_ORDER_LIMIT_PER_MINUTE", "10")))
 API_MAX_CONCURRENT_ORDERS = max(1, int(os.getenv("API_MAX_CONCURRENT_ORDERS", "1")))
-API_INVALID_AUTH_LIMIT_PER_MINUTE = max(
-    1,
-    int(os.getenv("API_INVALID_AUTH_LIMIT_PER_MINUTE", "20")),
-)
+API_INVALID_AUTH_LIMIT_PER_MINUTE = max(1, int(os.getenv("API_INVALID_AUTH_LIMIT_PER_MINUTE", "20")))
 API_MAX_REQUEST_BYTES = max(1024, int(os.getenv("API_MAX_REQUEST_BYTES", "16384")))
 
 # The gateway on Wasmer sends this value to the bot for every internal API
@@ -92,7 +114,10 @@ REDIS_URL = os.getenv("REDIS_URL", "")
 # STOCK ALERTS
 # ==========================================================
 
-STOCK_GROUP_ID = -1004396081675
+STOCK_GROUP_ID = os.getenv(
+    "STOCK_GROUP_ID",
+    STOCK_NOTIFICATION_CHANNEL_ID,
+)
 
 STOCK_NOTIFICATIONS = True
 
@@ -422,7 +447,9 @@ DEPOSIT_AMOUNT_TOLERANCE = "0.000001"
 
 DEPOSIT_ALLOW_OVERPAY = True
 
-DEPOSIT_MAX_CHECK_ATTEMPTS = 60
+# A pending deposit is checked at most this many times, including the first
+# check after the customer submits its reference. It is then cancelled.
+DEPOSIT_MAX_CHECK_ATTEMPTS = max(1, int(os.getenv("DEPOSIT_MAX_CHECK_ATTEMPTS", "10")))
 
 DEPOSIT_DELETE_FAILED = False
 
@@ -671,6 +698,13 @@ RESELLER_API_KEY = os.getenv(
     "",
 )
 
+RESELLER_API_SECRET = os.getenv(
+    "RESELLER_API_SECRET",
+    "",
+)
+
+UPSTREAM_CALLBACK_URL = os.getenv("UPSTREAM_CALLBACK_URL", "").strip()
+
 
 RESELLER_API_TIMEOUT = int(
     os.getenv(
@@ -698,20 +732,10 @@ DATABASE_POOL_TIMEOUT = int(os.getenv("DATABASE_POOL_TIMEOUT", "10"))
 # every Telegram update. Set either value to 0 to turn its cache off.
 MEMBERSHIP_CACHE_TTL = int(os.getenv("MEMBERSHIP_CACHE_TTL", "300"))
 BANNED_USER_CACHE_TTL = int(os.getenv("BANNED_USER_CACHE_TTL", "30"))
-
-# Recheck new channel/group joins because Telegram can take a few seconds
-# to update membership status.
-MEMBERSHIP_VERIFY_ATTEMPTS = max(
-    1,
-    int(os.getenv("MEMBERSHIP_VERIFY_ATTEMPTS", "3")),
-)
-MEMBERSHIP_RETRY_DELAY_SECONDS = max(
-    0.0,
-    min(
-        5.0,
-        float(os.getenv("MEMBERSHIP_RETRY_DELAY_SECONDS", "1")),
-    ),
-)
+# Telegram can take a moment to report a newly joined member. These retries
+# are used only when a fresh membership check is required.
+MEMBERSHIP_VERIFY_ATTEMPTS = max(1, int(os.getenv("MEMBERSHIP_VERIFY_ATTEMPTS", "3")))
+MEMBERSHIP_RETRY_DELAY_SECONDS = max(0.0, min(5.0, float(os.getenv("MEMBERSHIP_RETRY_DELAY_SECONDS", "1"))))
 ENABLE_PERFORMANCE_METRICS = True
 METRICS_COLLECTION_INTERVAL = 60
 CACHE_BACKEND = "memory"

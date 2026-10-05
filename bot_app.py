@@ -20,11 +20,6 @@ from middleware.membership import BannedUserMiddleware
 
 from handlers.start import router as start_router
 from handlers.products import router as products_router
-from handlers.orders import router as orders_router
-from handlers.referral import router as referrals_router
-from handlers.support import router as support_router
-from handlers.user_promo import router as user_promo_router
-from handlers.api_keys import router as api_keys_router
 
 
 # ============================================================
@@ -35,8 +30,6 @@ from handlers.admin import router as admin_router
 from handlers.admin_products import router as admin_products_router
 from handlers.admin_product_manage import router as admin_product_manage_router
 from handlers.admin_orders import router as admin_orders_router
-from handlers.admin_support import router as admin_support_router
-from handlers.admin_promo import router as admin_promo_router
 
 
 # ============================================================
@@ -108,28 +101,6 @@ dp.include_router(
     products_router
 )
 
-dp.include_router(
-    orders_router
-)
-
-dp.include_router(
-    referrals_router
-)
-
-dp.include_router(
-    user_promo_router
-)
-
-# API Access button handler
-dp.include_router(
-    api_keys_router
-)
-
-dp.include_router(
-    support_router
-)
-
-
 # ============================================================
 # LOAD ADMIN ROUTERS
 # ============================================================
@@ -153,15 +124,6 @@ dp.include_router(
 dp.include_router(
     admin_orders_router
 )
-
-dp.include_router(
-    admin_support_router
-)
-
-dp.include_router(
-    admin_promo_router
-)
-
 
 # ============================================================
 # READY

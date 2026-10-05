@@ -26,6 +26,12 @@ from api.reseller_v1 import router as reseller_router
 from bot_app import bot, dp
 from delivery_bot_app import delivery_bot, delivery_dp
 from services.deposit_checker import deposit_checker_loop
+from services.order_notifications import order_notification_loop
+from services.product_api_access import ensure_product_api_access_schema
+from services.provider_schema import ensure_provider_schema
+from services.maintenance_mode import ensure_maintenance_schema, is_maintenance_enabled
+from services.order_rating_schema import ensure_order_rating_schema
+from services.upstream_callbacks import process_upstream_callback
 from config import API_MAX_REQUEST_BYTES
 
 
@@ -63,10 +69,16 @@ if not INTERNAL_SECRET:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     deposit_task: asyncio.Task | None = None
+    order_notification_task: asyncio.Task | None = None
     polling_task: asyncio.Task | None = None
     delivery_polling_task: asyncio.Task | None = None
 
     try:
+        await asyncio.to_thread(ensure_product_api_access_schema)
+        await asyncio.to_thread(ensure_provider_schema)
+        await asyncio.to_thread(ensure_maintenance_schema)
+        await asyncio.to_thread(ensure_order_rating_schema)
+
         # ----------------------------------------------------
         # Telegram main bot
         # ----------------------------------------------------
@@ -85,8 +97,13 @@ async def lifespan(app: FastAPI):
         # ----------------------------------------------------
 
         deposit_task = asyncio.create_task(
-            deposit_checker_loop(),
+            deposit_checker_loop(bot),
             name="deposit-checker",
+        )
+
+        order_notification_task = asyncio.create_task(
+            order_notification_loop(bot),
+            name="admin-order-notifications",
         )
 
         # ----------------------------------------------------
@@ -139,6 +156,7 @@ async def lifespan(app: FastAPI):
             delivery_polling_task,
             polling_task,
             deposit_task,
+            order_notification_task,
         )
 
         for task in tasks:
@@ -173,6 +191,12 @@ app = FastAPI(
 )
 
 
+@app.post("/api/v1/upstream/callback")
+async def upstream_callback(request: Request):
+    raw_body = await request.body()
+    return await process_upstream_callback(raw_body, request.headers, bot)
+
+
 @app.exception_handler(RequestValidationError)
 async def api_validation_error(request: Request, exc: RequestValidationError):
     """Keep malformed public API requests small and predictable for clients."""
@@ -196,6 +220,16 @@ async def api_validation_error(request: Request, exc: RequestValidationError):
 
 @app.middleware("http")
 async def request_logger(request: Request, call_next):
+
+    if request.url.path.startswith("/api/v1/") and await asyncio.to_thread(is_maintenance_enabled):
+        return JSONResponse(
+            status_code=503,
+            content={
+                "success": False,
+                "error": "maintenance_mode",
+                "message": "Rain Store is currently under maintenance. Please check back soon.",
+            },
+        )
 
     if request.url.path.startswith("/api/v1/"):
         content_length = request.headers.get("content-length")

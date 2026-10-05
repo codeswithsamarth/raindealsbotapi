@@ -334,6 +334,13 @@ async def support_faq(callback: CallbackQuery):
         inline_keyboard=[
             [
                 InlineKeyboardButton(
+                    text="💰 Payments & Deposits",
+                    callback_data="faq_payments",
+                    style="primary"
+                )
+            ],
+            [
+                InlineKeyboardButton(
                     text="📦 Orders & Delivery",
                     callback_data="faq_orders",
                     style="primary"
@@ -391,6 +398,17 @@ async def faq_category(callback: CallbackQuery):
     await callback.answer()
 
     faq_content = {
+        "faq_payments": (
+            "💰 <b>Payments & Deposits</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "💳 <b>How to deposit?</b>\n"
+            "• Go to Wallet → Deposit\n"
+            "• Choose your payment method\n"
+            "• Minimum deposit: $5.00\n\n"
+            "⏱️ <b>Processing time?</b>\n"
+            "• Crypto: 10-30 min\n"
+            "• UPI/Pay: 5-15 min\n"
+        ),
         "faq_orders": (
             "📦 <b>Orders & Delivery</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n\n"

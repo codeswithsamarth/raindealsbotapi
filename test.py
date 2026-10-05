@@ -1,551 +1,706 @@
-"""RainDeals Bot Wasmer Reseller API Gateway.
-
-This service is the public API boundary.  It proxies authenticated requests to
-the configured delivery backend without exposing its address or credentials.
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+CHATGPT ACCOUNT CREATOR - API EDITION (MULTI-SESSION + CF BYPASS + MANUAL OTP FALLBACK)
+Drives samemailread.onrender.com to get OTP via REST API
+Prompts for Mailbox API key at runtime
+Browsers stay open after completion
 """
 
-from __future__ import annotations
-
-import hashlib
-import http.client
-import json
-import logging
+import sys
 import os
-import re
-import socket
-import ssl
-import threading
 import time
-from dataclasses import dataclass
-from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from queue import Empty, LifoQueue
-from typing import Any
-from urllib.parse import parse_qs, urlsplit
+import random
+import re
+import logging
+import subprocess
+import codecs
+from datetime import datetime, timedelta
+from typing import Optional, List
+from urllib.parse import quote, unquote
+
+# Force UTF-8 on Windows
+if sys.platform == 'win32':
+    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
+    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
 
 
-BOT_INTERNAL_URL = os.environ.get("BOT_INTERNAL_URL", "").strip().rstrip("/")
-BOT_INTERNAL_SECRET = os.environ.get("BOT_INTERNAL_SECRET", "").strip()
-BACKEND_CA_FILE = os.environ.get(
-    "BACKEND_CA_FILE",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "ca.pem"),
-)
-HOST = os.environ.get("HOST", "0.0.0.0")
-PORT = int(os.environ.get("PORT", "80"))
-MAX_BODY_BYTES = 64 * 1024
-# Render's product response is currently about 6 seconds, so preserve valid
-# responses with the requested eight-second read budget (instead of failing at
-# five seconds).  There is still no 30/60-second hang.
-BACKEND_TIMEOUT = (3.0, 8.0)  # connect, read
-PRODUCT_CACHE_TTL = 30.0
-
-PUBLIC_V1_ORDER_PATH = re.compile(r"^/api/v1/order/[1-9][0-9]*$")
-PUBLIC_ORDER_PATH = re.compile(r"^/api/reseller/orders/([1-9][0-9]*)$")
-LOG = logging.getLogger("raindeals.gateway")
-
-
-def json_bytes(data: Any) -> bytes:
-    return json.dumps(data, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-
-
-def configured() -> bool:
-    return bool(BOT_INTERNAL_URL and BOT_INTERNAL_SECRET)
-
-
-def build_backend_ssl_context() -> ssl.SSLContext:
-    """Use a complete bundled CA store when the Wasmer image has none.
-
-    Python's pip distribution includes certifi's Mozilla CA bundle.  This avoids
-    trusting a single guessed CA and keeps hostname/certificate verification on.
-    The local X1/X2 file remains a safe fallback for minimal Python runtimes.
-    """
+# ==================== FIX DISTUTILS ====================
+def fix_distutils():
     try:
-        from pip._vendor import certifi
+        import distutils
+        return True
+    except ModuleNotFoundError:
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "setuptools"],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True
+        except:
+            import types
+            distutils = types.ModuleType('distutils')
+            sys.modules['distutils'] = distutils
+            distutils.version = types.ModuleType('distutils.version')
+            sys.modules['distutils.version'] = distutils.version
 
-        return ssl.create_default_context(cafile=certifi.where())
-    except (ImportError, AttributeError, OSError):
-        return ssl.create_default_context(cafile=BACKEND_CA_FILE)
+            class LooseVersion:
+                def __init__(self, vstring): self.vstring = vstring
 
+                def __lt__(self, other): return True
 
-BACKEND_SSL_CONTEXT = build_backend_ssl_context()
+                def __le__(self, other): return True
 
+                def __eq__(self, other): return False
 
-def backend_url(path: str, query: str = "") -> str:
-    """Build a backend URL from a fixed, application-owned route."""
-    if not path.startswith("/"):
-        raise ValueError("Backend path must start with '/'.")
-    return f"{BOT_INTERNAL_URL}{path}" + (f"?{query}" if query else "")
+                def __ne__(self, other): return True
 
+                def __gt__(self, other): return False
 
-def safe_content_type(value: str | None) -> str:
-    """Do not reflect arbitrary/internal upstream headers to public clients."""
-    if value and value.lower().split(";", 1)[0].strip() in {
-        "application/json",
-        "application/problem+json",
-        "text/plain",
-        "text/html",
-    }:
-        return value
-    return "application/json; charset=utf-8"
+                def __ge__(self, other): return False
 
+                def parse(self): return [0]
 
-def contains_internal_data(body: bytes) -> bool:
-    """Fail closed if an upstream error accidentally includes private values."""
-    sensitive = (BOT_INTERNAL_URL, BOT_INTERNAL_SECRET)
-    return any(value and value.encode("utf-8") in body for value in sensitive)
-
-
-@dataclass(frozen=True)
-class CachedProducts:
-    expires_at: float
-    body: bytes
-    content_type: str
+            distutils.version.LooseVersion = LooseVersion
+            return True
 
 
-class ProductCache:
-    """Short, per-reseller cache.  Keys are hashes so API keys are not retained."""
+fix_distutils()
 
-    def __init__(self) -> None:
-        self._entries: dict[str, CachedProducts] = {}
-        self._lock = threading.Lock()
+# ==================== IMPORTS ====================
+try:
+    import undetected_chromedriver as uc
+
+    UC_AVAILABLE = True
+except ImportError:
+    UC_AVAILABLE = False
+
+try:
+    import requests
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "requests"],
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    import requests
+
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
+
+# ==================== LOGGING ====================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(message)s',
+    handlers=[
+        logging.FileHandler('chatgpt_creator.log', encoding='utf-8'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
+
+
+# ==================== CONFIG ====================
+class Config:
+    SIGNUP_URL = "https://chatgpt.com/signup"
+    API_BASE_URL = "https://samemailread.onrender.com"
+    HEADLESS = False
+    KEEP_BROWSER_OPEN = True
+
+    NAMES = ["James", "Maria", "David", "Sarah", "Michael", "Emma", "John", "Lisa",
+             "Robert", "Anna", "William", "Olivia", "Christopher", "Amanda", "Daniel",
+             "Jessica", "Matthew", "Ashley", "Anthony", "Jennifer", "Elizabeth"]
+
+    LAST_NAMES = ["Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller",
+                  "Davis", "Rodriguez", "Martinez", "Wilson", "Taylor", "Anderson",
+                  "Thomas", "Jackson", "White", "Harris", "Martin", "Thompson", "Moore"]
 
     @staticmethod
-    def key(api_key: str) -> str:
-        return hashlib.sha256(api_key.encode("utf-8")).hexdigest()
+    def random_name():
+        return f"{random.choice(Config.NAMES)} {random.choice(Config.LAST_NAMES)}"
 
-    def get(self, api_key: str) -> CachedProducts | None:
-        now = time.monotonic()
-        key = self.key(api_key)
-        with self._lock:
-            entry = self._entries.get(key)
-            if entry and entry.expires_at > now:
-                return entry
-            self._entries.pop(key, None)
+    @staticmethod
+    def random_age():
+        return random.randint(18, 65)
+
+    @staticmethod
+    def random_dob():
+        age = Config.random_age()
+        today = datetime.now()
+        dob = today - timedelta(days=age * 365 + random.randint(0, 364))
+        return dob.strftime("%Y-%m-%d")
+
+    @staticmethod
+    def random_password():
+        chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*"
+        return ''.join(random.choice(chars) for _ in range(12))
+
+    @staticmethod
+    def generate_aliases(email: str, count: int) -> List[str]:
+        email = unquote(email).strip()
+        if '@' not in email:
+            raise ValueError(f"Invalid email address provided: {email}")
+
+        aliases = []
+        username = email.split('@')[0]
+        domain = email.split('@')[1]
+        suffixes = ["shop", "news", "work", "personal", "social", "bills",
+                    "travel", "health", "fitness", "learning", "tech", "finance",
+                    "family", "friends", "projects", "work2", "extra1", "extra2", "extra3", "extra4"]
+        for i in range(min(count, len(suffixes))):
+            aliases.append(f"{username}+{suffixes[i]}@{domain}")
+        return aliases
+
+
+# ==================== ROBUST CLICK & CLOUDFLARE HELPERS ====================
+def _click_any(driver, element):
+    try:
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", element)
+        time.sleep(0.3)
+    except Exception:
+        pass
+    try:
+        element.click()
+        return True
+    except Exception:
+        pass
+    try:
+        driver.execute_script("arguments[0].click();", element)
+        return True
+    except Exception:
+        pass
+    try:
+        driver.execute_script("""
+            var el = arguments[0];
+            ['mousedown','mouseup','click'].forEach(function(t){
+                el.dispatchEvent(new MouseEvent(t, {bubbles:true, cancelable:true, view:window}));
+            });
+        """, element)
+        return True
+    except Exception:
+        return False
+
+
+def handle_cloudflare_turnstile(driver, timeout=10):
+    """Detects and attempts to click Cloudflare Turnstile checkboxes inside iframes."""
+    logger.info("Checking for Cloudflare / Turnstile challenge...")
+    start_time = time.time()
+
+    while time.time() - start_time < timeout:
+        try:
+            driver.switch_to.default_content()
+            frames = driver.find_elements(By.TAG_NAME, "iframe")
+            for frame in frames:
+                try:
+                    driver.switch_to.frame(frame)
+                    checkbox_selectors = [
+                        "input[type='checkbox']",
+                        ".mark",
+                        "#challenge-stage input",
+                        "iframe"
+                    ]
+                    for selector in checkbox_selectors:
+                        elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                        for el in elements:
+                            if el.is_displayed():
+                                logger.info("🛡️ Cloudflare challenge widget found. Interacting human-like...")
+                                time.sleep(random.uniform(0.8, 1.5))
+                                actions = ActionChains(driver)
+                                actions.move_to_element(el).pause(0.4).click().perform()
+                                logger.info("✓ Clicked Cloudflare verification element")
+                                driver.switch_to.default_content()
+                                time.sleep(2)
+                                return True
+                except Exception:
+                    pass
+                finally:
+                    driver.switch_to.default_content()
+
+            main_checkbox = driver.find_elements(By.XPATH, "//input[@type='checkbox' or contains(@class, 'turnstile')]")
+            for cb in main_checkbox:
+                if cb.is_displayed():
+                    time.sleep(random.uniform(0.8, 1.5))
+                    cb.click()
+                    driver.switch_to.default_content()
+                    return True
+        except Exception as e:
+            logger.debug(f"CF check loop error: {e}")
+
+        time.sleep(1)
+
+    driver.switch_to.default_content()
+    return False
+
+
+def find_signup_button(driver):
+    xpaths = [
+        "//button[contains(normalize-space(.), 'Sign up for free')]",
+        "//a[contains(normalize-space(.), 'Sign up for free')]",
+        "//*[@role='button' and contains(normalize-space(.), 'Sign up for free')]",
+        "//button[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'sign up')]",
+        "//a[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'sign up')]",
+        "//*[@role='button' and contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'sign up')]",
+        "//*[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'free') and (self::button or self::a or @role='button')]",
+    ]
+
+    def _search(context):
+        for xp in xpaths:
+            try:
+                els = context.find_elements(By.XPATH, xp)
+                for el in els:
+                    if el.is_displayed():
+                        return el
+            except Exception:
+                continue
         return None
 
-    def put(self, api_key: str, body: bytes, content_type: str) -> None:
-        entry = CachedProducts(time.monotonic() + PRODUCT_CACHE_TTL, body, content_type)
-        with self._lock:
-            self._entries[self.key(api_key)] = entry
+    el = _search(driver)
+    if el:
+        return el
+
+    try:
+        frames = driver.find_elements(By.TAG_NAME, "iframe")
+        for frame in frames:
+            try:
+                driver.switch_to.frame(frame)
+                el = _search(driver)
+                if el:
+                    driver.switch_to.default_content()
+                    return el
+            except Exception:
+                pass
+            finally:
+                try:
+                    driver.switch_to.default_content()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    return None
 
 
-PRODUCT_CACHE = ProductCache()
+def click_signup_button(driver, timeout=15):
+    logger.info("Looking for 'Sign up for free' button...")
+    time.sleep(2)
+
+    el = find_signup_button(driver)
+    if el:
+        if _click_any(driver, el):
+            logger.info("✓ Signup button clicked")
+            time.sleep(2)
+            return True
+        logger.warning("Found button but couldn't click")
+    return False
 
 
-@dataclass(frozen=True)
-class BackendResponse:
-    status: int
-    body: bytes
-    content_type: str | None
-
-
-class BackendTimeout(Exception):
-    """The backend exceeded the connection or response-read budget."""
-
-
-class BackendConnectionPool:
-    """Persistent HTTP/HTTPS connections using Python's standard library only."""
-
-    def __init__(self, maxsize: int = 20) -> None:
-        self._connections: LifoQueue[http.client.HTTPConnection] = LifoQueue(maxsize)
-
-    def _new_connection(self) -> http.client.HTTPConnection:
-        parsed = urlsplit(BOT_INTERNAL_URL)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            raise OSError("Invalid backend configuration.")
-        if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
-            raise OSError("Backend base URL may not include a path or query.")
-
-        try:
-            port = parsed.port or (443 if parsed.scheme == "https" else 80)
-        except ValueError as error:
-            raise OSError("Backend port is invalid.") from error
-        if parsed.scheme == "https":
-            return http.client.HTTPSConnection(
-                parsed.hostname,
-                port=port,
-                timeout=BACKEND_TIMEOUT[0],
-                context=BACKEND_SSL_CONTEXT,
-            )
-
-        return http.client.HTTPConnection(
-            parsed.hostname,
-            port=port,
-            timeout=BACKEND_TIMEOUT[0],
+def wait_and_find(driver, by, value, timeout=10):
+    try:
+        return WebDriverWait(driver, timeout).until(
+            EC.presence_of_element_located((by, value))
         )
+    except Exception:
+        return None
 
-    def _release(self, connection: http.client.HTTPConnection) -> None:
+
+def wait_and_click(driver, by, value, timeout=10):
+    try:
+        el = WebDriverWait(driver, timeout).until(
+            EC.element_to_be_clickable((by, value))
+        )
+        return _click_any(driver, el)
+    except Exception:
+        return False
+
+
+# ==================== SAMEMAILREAD API CLIENT ====================
+class SamemailreadClient:
+    """Client for samemailread.onrender.com API to fetch OTPs programmatically."""
+
+    def __init__(self, api_key: str, base_url: str = Config.API_BASE_URL, timeout: int = 30):
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
+
+    @property
+    def headers(self) -> dict[str, str]:
+        return {"X-API-Key": self.api_key, "Accept": "application/json"}
+
+    def fetch_otp(self, email: str, timeout: int = 45) -> Optional[str]:
+        logger.info(f"Polling API for OTP for {email}...")
+        start_time = time.time()
+
+        while time.time() - start_time < timeout:
+            try:
+                encoded_email = quote(email, safe="")
+                response = requests.get(
+                    f"{self.base_url}/read/{encoded_email}",
+                    headers=self.headers,
+                    params={"limit": 10, "new_only": "true"},
+                    timeout=self.timeout,
+                )
+
+                if response.ok:
+                    data = response.json()
+                    messages = data.get("messages", []) if isinstance(data, dict) else data
+                    if not messages and isinstance(data, list):
+                        messages = data
+
+                    for msg in messages:
+                        body = str(msg.get("body", "")) + str(msg.get("snippet", "")) + str(msg.get("subject", ""))
+                        match = re.search(r'\b(\d{6})\b', body)
+                        if match:
+                            otp = match.group(1)
+                            if otp not in ("2023", "2024", "2025", "2026"):
+                                logger.info(f"✅ OTP found via API: {otp}")
+                                self.mark_seen(email)
+                                return otp
+            except Exception as e:
+                logger.debug(f"API poll error: {e}")
+
+            time.sleep(5)
+
+        logger.warning(f"⚠️ API polling timed out for {email}")
+        return None
+
+    def mark_seen(self, email: str):
         try:
-            self._connections.put_nowait(connection)
-        except Exception:
-            connection.close()
-
-    def request(
-        self,
-        method: str,
-        path: str,
-        query: str,
-        headers: dict[str, str],
-        body: bytes | None,
-    ) -> BackendResponse:
-        try:
-            connection = self._connections.get_nowait()
-        except Empty:
-            connection = self._new_connection()
-
-        try:
-            if connection.sock is None:
-                connection.timeout = BACKEND_TIMEOUT[0]
-
-            target = path + (f"?{query}" if query else "")
-            connection.request(method, target, body=body, headers=headers)
-
-            if connection.sock is not None:
-                connection.sock.settimeout(BACKEND_TIMEOUT[1])
-
-            response = connection.getresponse()
-            result = BackendResponse(
-                status=response.status,
-                body=response.read(),
-                content_type=response.getheader("Content-Type"),
+            encoded_email = quote(email, safe="")
+            requests.post(
+                f"{self.base_url}/v1/read/{encoded_email}/mark-seen",
+                headers=self.headers,
+                timeout=self.timeout,
             )
-            should_close = response.will_close
-
-        except socket.timeout as error:
-            connection.close()
-            raise BackendTimeout() from error
-
-        except (OSError, http.client.HTTPException):
-            connection.close()
-            raise
-
-        if should_close:
-            connection.close()
-        else:
-            self._release(connection)
-
-        return result
+        except Exception:
+            pass
 
 
-BACKEND_POOL = BackendConnectionPool()
+# ==================== CHATGPT CREATOR ====================
+class ChatGPTCreator:
+    def __init__(self, api_key: str):
+        self.driver = None
+        self.successful = 0
+        self.failed = 0
+        self.total = 0
+        self.api_key = api_key
+        self.api_client = SamemailreadClient(api_key)
+
+    def setup_driver(self):
+        logger.info("Starting a new ChatGPT browser session...")
+
+        if UC_AVAILABLE:
+            try:
+                options = uc.ChromeOptions()
+                if Config.HEADLESS:
+                    options.add_argument('--headless')
+                options.add_argument('--disable-blink-features=AutomationControlled')
+                options.add_argument('--disable-gpu')
+                options.add_argument('--no-sandbox')
+                options.add_argument('--disable-dev-shm-usage')
+                options.add_argument('--window-size=1200,800')
+
+                self.driver = uc.Chrome(options=options, version_main=154, headless=Config.HEADLESS)
+                self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
+                logger.info("✓ Browser ready (undetected)")
+                return True
+            except Exception as e:
+                logger.warning(f"Undetected failed: {e}")
+
+        try:
+            options = Options()
+            if Config.HEADLESS:
+                options.add_argument('--headless')
+            options.add_argument('--disable-blink-features=AutomationControlled')
+            options.add_argument('--disable-gpu')
+            options.add_argument('--no-sandbox')
+            options.add_argument('--disable-dev-shm-usage')
+            options.add_experimental_option("excludeSwitches", ["enable-automation"])
+            options.add_experimental_option('useAutomationExtension', False)
+
+            self.driver = webdriver.Chrome(options=options)
+            self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
+            logger.info("✓ Browser ready (standard)")
+            return True
+        except Exception as e:
+            logger.error(f"Driver failed: {e}")
+            return False
+
+    def create_account(self, email: str) -> bool:
+        try:
+            name = Config.random_name()
+            age = Config.random_age()
+            password = Config.random_password()
+
+            logger.info(f"Creating account for: {email}")
+
+            # 1) Open signup & handle initial Cloudflare
+            self.driver.get(Config.SIGNUP_URL)
+            time.sleep(3)
+            handle_cloudflare_turnstile(self.driver, timeout=8)
+
+            # 2) Click Sign up for free
+            click_signup_button(self.driver)
+            time.sleep(2)
+            handle_cloudflare_turnstile(self.driver, timeout=6)
+
+            # 3) Enter email
+            email_input = None
+            for selector in [
+                (By.CSS_SELECTOR, "input[type='email']"),
+                (By.CSS_SELECTOR, "input[name='email']"),
+                (By.XPATH, "//input[@type='email']"),
+                (By.XPATH, "//input[@name='email']"),
+                (By.XPATH, "//input[contains(@placeholder,'email')]"),
+            ]:
+                email_input = wait_and_find(self.driver, *selector, timeout=5)
+                if email_input:
+                    break
+
+            if not email_input:
+                logger.error("✗ Email input not found")
+                return False
+
+            email_input.clear()
+            email_input.send_keys(email)
+            time.sleep(1)
+
+            handle_cloudflare_turnstile(self.driver, timeout=5)
+
+            if not wait_and_click(self.driver, By.XPATH, "//button[contains(text(),'Continue')]", timeout=3):
+                email_input.send_keys(Keys.RETURN)
+            time.sleep(3)
+
+            # 4) Password (optional)
+            password_input = wait_and_find(self.driver, By.CSS_SELECTOR, "input[type='password']", timeout=3)
+            if password_input:
+                logger.info("🔑 Password field detected")
+                password_input.clear()
+                password_input.send_keys(password)
+                time.sleep(1)
+                if not wait_and_click(self.driver, By.XPATH, "//button[contains(text(),'Continue')]", timeout=3):
+                    password_input.send_keys(Keys.RETURN)
+                time.sleep(2)
+
+            # 5) Fetch OTP via samemailread API with Fallback Prompt
+            logger.info("📱 Fetching OTP via API...")
+            otp = self.api_client.fetch_otp(email, timeout=45)
+
+            if not otp:
+                print(f"\n⚠️ API didn't pick up the OTP automatically for {email}.")
+                print("👉 Please check your email inbox/dashboard manually and enter the 6-digit code.")
+                otp = input("Enter OTP manually: ").strip()
+                if not otp or len(otp) != 6:
+                    logger.error("✗ Invalid or missing manual OTP")
+                    return False
+
+            logger.info(f"✅ OTP: {otp}")
+
+            # 6) Enter OTP
+            otp_input = None
+            for selector in [
+                (By.CSS_SELECTOR, "input[autocomplete='one-time-code']"),
+                (By.CSS_SELECTOR, "input[name='code']"),
+                (By.XPATH, "//input[contains(@placeholder,'code')]"),
+                (By.XPATH, "//input[contains(@placeholder,'verification')]"),
+            ]:
+                otp_input = wait_and_find(self.driver, *selector, timeout=5)
+                if otp_input:
+                    break
+
+            if not otp_input:
+                logger.error("✗ OTP input not found")
+                return False
+
+            for digit in otp:
+                otp_input.send_keys(digit)
+                time.sleep(0.1)
+            time.sleep(1)
+
+            if not wait_and_click(self.driver, By.XPATH, "//button[contains(text(),'Continue')]", timeout=3):
+                otp_input.send_keys(Keys.RETURN)
+            time.sleep(3)
+
+            # 7) Name and Age
+            name_input = None
+            for selector in [
+                (By.CSS_SELECTOR, "input[name='name']"),
+                (By.XPATH, "//input[contains(@placeholder,'Name')]"),
+                (By.CSS_SELECTOR, "input[autocomplete='name']"),
+            ]:
+                name_input = wait_and_find(self.driver, *selector, timeout=3)
+                if name_input:
+                    break
+
+            if name_input:
+                name_input.clear()
+                name_input.send_keys(name)
+                time.sleep(0.5)
+
+            age_input = None
+            for selector in [
+                (By.CSS_SELECTOR, "input[name='age']"),
+                (By.XPATH, "//input[contains(@placeholder,'Age')]"),
+                (By.CSS_SELECTOR, "input[type='number']"),
+            ]:
+                age_input = wait_and_find(self.driver, *selector, timeout=3)
+                if age_input:
+                    break
+
+            if age_input:
+                age_input.clear()
+                age_input.send_keys(str(age))
+                time.sleep(0.5)
+
+            if not wait_and_click(self.driver, By.XPATH, "//button[contains(text(),'Continue')]", timeout=3):
+                try:
+                    self.driver.find_element(By.TAG_NAME, "form").submit()
+                except Exception:
+                    pass
+            time.sleep(3)
+
+            # 8) Onboarding Continue
+            logger.info("🔄 Clicking onboarding Continue...")
+            for text in ['Continue', 'Next', 'Get started', "Let's go", 'All set']:
+                if wait_and_click(self.driver, By.XPATH, f"//button[contains(text(),'{text}')]", timeout=2):
+                    logger.info(f"✓ Clicked: {text}")
+                    time.sleep(1)
+                    break
+
+            # 9) Send Hello
+            logger.info("💬 Sending hello...")
+            response = None
+            try:
+                chat_input = None
+                for selector in [
+                    (By.CSS_SELECTOR, "textarea[placeholder*='message']"),
+                    (By.CSS_SELECTOR, "textarea#prompt-textarea"),
+                    (By.CSS_SELECTOR, "div[contenteditable='true']"),
+                ]:
+                    chat_input = wait_and_find(self.driver, *selector, timeout=5)
+                    if chat_input:
+                        break
+
+                if chat_input:
+                    _click_any(self.driver, chat_input)
+                    time.sleep(0.5)
+                    try:
+                        chat_input.clear()
+                    except Exception:
+                        pass
+                    chat_input.send_keys("hello")
+                    time.sleep(0.5)
+                    chat_input.send_keys(Keys.RETURN)
+                    logger.info("✓ Hello sent")
+                    time.sleep(3)
+
+                    try:
+                        for elem in self.driver.find_elements(By.CSS_SELECTOR, ".markdown, .prose"):
+                            if elem.is_displayed() and len(elem.text) > 10:
+                                response = elem.text
+                                break
+                    except Exception:
+                        pass
+            except Exception:
+                logger.warning("Could not send hello")
+
+            with open('accounts_verified.txt', 'a', encoding='utf-8') as f:
+                if response:
+                    f.write(f"{email}|{password}|{name}|{age}|{otp}|VERIFIED|RESPONSE:{response[:500]}\n")
+                else:
+                    f.write(f"{email}|{password}|{name}|{age}|{otp}|VERIFIED\n")
+
+            self.successful += 1
+            print(f"\n✅ {email} - SUCCESS")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error: {e}")
+            self.failed += 1
+            return False
+
+    def run(self):
+        print("\n" + "=" * 60)
+        print("🤖 CHATGPT ACCOUNT CREATOR (MULTI-SESSION + CF BYPASS)")
+        print("=" * 60)
+
+        print("\n📧 Enter base Outlook email:")
+        base_email = input("Email: ").strip()
+        if not base_email:
+            return
+
+        try:
+            count = int(input("How many accounts? (e.g., 2, 3, 5...): ").strip() or "2")
+        except Exception:
+            count = 2
+
+        try:
+            aliases = Config.generate_aliases(base_email, count)
+        except Exception as e:
+            print(f"❌ Error generating aliases: {e}")
+            return
+
+        print(f"\n✅ Generated {len(aliases)} aliases:")
+        for i, alias in enumerate(aliases):
+            print(f"  {i + 1}. {alias}")
+
+        print("\n" + "=" * 60)
+        print("🚀 STARTING BATCH CREATION")
+        print("=" * 60)
+
+        for i, email in enumerate(aliases):
+            self.total = i + 1
+            print(f"\n──────────────────────────────────────────────")
+            print(f"📱 Processing Account {self.total}/{len(aliases)}: {email}")
+            print(f"──────────────────────────────────────────────")
+
+            if not self.setup_driver():
+                print(f"❌ ChatGPT driver setup failed for {email}")
+                self.failed += 1
+                continue
+
+            self.create_account(email)
+
+            print(f"\n🟢 Browser window for {email} is held open.")
+            if i < len(aliases) - 1:
+                print("⏳ Preparing next browser instance for the next account...")
+                time.sleep(2)
+
+        print("\n" + "=" * 60)
+        print("📊 SUMMARY")
+        print("=" * 60)
+        print(f"Total Attempted: {self.total}")
+        print(f"✅ Successful: {self.successful}")
+        print(f"❌ Failed: {self.failed}")
+        print(f"📁 Saved to: accounts_verified.txt")
+        print("=" * 60)
+
+        if Config.KEEP_BROWSER_OPEN:
+            print("\n🟢 All browser windows stay open. Close them manually when done.")
+            try:
+                while True:
+                    time.sleep(10)
+            except KeyboardInterrupt:
+                print("\n🔴 Closing application...")
 
 
-class GatewayHandler(BaseHTTPRequestHandler):
-    server_version = "RainDealsBotResellerAPI/2.1"
-    protocol_version = "HTTP/1.1"
+# ==================== MAIN ====================
+def main():
+    print("""
+    ╔═══════════════════════════════════════════╗
+    ║     CHATGPT ACCOUNT CREATOR               ║
+    ║     API EDITION + CLOUDFLARE BYPASS       ║
+    ╚═══════════════════════════════════════════╝
+    """)
 
-    def log_message(self, _format: str, *_args: object) -> None:
-        # BaseHTTPRequestHandler can include arbitrary request text in its log.
-        # We log only the request method/path and never headers or bodies.
+    api_key = input("🔑 Enter your Mailbox API Key: ").strip()
+    if not api_key:
+        print("❌ API key is required to fetch OTPs. Exiting.", file=sys.stderr)
         return
 
-    def send_bytes(self, status: int, body: bytes, content_type: str = "application/json; charset=utf-8") -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", safe_content_type(content_type))
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Referrer-Policy", "no-referrer")
-        self.end_headers()
-        self.wfile.write(body)
-
-    def send_json(self, status: int, data: dict[str, Any]) -> None:
-        self.send_bytes(status, json_bytes(data))
-
-    def error(self, status: int, code: str, message: str) -> None:
-        self.send_json(status, {"success": False, "error": code, "message": message})
-
-    def unavailable(self, status: int = 502) -> None:
-        self.error(
-            status,
-            "delivery_service_unavailable",
-            "The delivery service is temporarily unavailable.",
-        )
-
-    def get_api_key(self) -> str:
-        """Accept current Bearer usage and the gateway's documented legacy forms."""
-        authorization = self.headers.get("Authorization", "").strip()
-        if authorization:
-            if authorization.lower().startswith("bearer "):
-                return authorization[7:].strip()
-            return authorization  # legacy Authorization: AK_xxx compatibility
-        return self.headers.get("X-API-Key", "").strip()
-
-    def require_api_key(self) -> str | None:
-        api_key = self.get_api_key()
-        if not api_key:
-            self.error(401, "missing_api_key", "Provide an API key using Authorization: Bearer <API_KEY>.")
-            return None
-        return api_key
-
-    def read_body(self) -> bytes | None:
-        try:
-            length = int(self.headers.get("Content-Length", "0"))
-        except ValueError:
-            self.error(400, "invalid_content_length", "Invalid request body length.")
-            return None
-        if length < 0:
-            self.error(400, "invalid_content_length", "Invalid request body length.")
-            return None
-        if length > MAX_BODY_BYTES:
-            self.error(413, "request_too_large", "Request body is too large.")
-            return None
-        return self.rfile.read(length)
-
-    def send_backend_response(self, response: BackendResponse) -> None:
-        # Never turn an upstream redirect into a public redirect.  In particular,
-        # Location is intentionally not copied from the upstream response.
-        if 300 <= response.status < 400 or contains_internal_data(response.body):
-            self.unavailable()
-            return
-        self.send_bytes(response.status, response.body, response.content_type)
-
-    def forward(
-        self,
-        method: str,
-        internal_path: str,
-        api_key: str,
-        body: bytes | None = None,
-        query: str = "",
-        cache_products: bool = False,
-    ) -> None:
-        if not configured():
-            self.unavailable(503)
-            return
-
-        if cache_products and not query:
-            cached = PRODUCT_CACHE.get(api_key)
-            if cached:
-                self.send_bytes(200, cached.body, cached.content_type)
-                LOG.info("[PROXY] %s %s -> 200 in 0.00s (cache)", method, internal_path)
-                return
-
-        headers = {
-            "Accept": "application/json",
-            "X-API-Key": api_key,
-            "X-Internal-Bot-Secret": BOT_INTERNAL_SECRET,
-        }
-        if body is not None:
-            headers["Content-Type"] = "application/json"
-
-        started = time.monotonic()
-        try:
-            response = BACKEND_POOL.request(
-                method=method,
-                path=internal_path,
-                query=query,
-                headers=headers,
-                body=body,
-            )
-        except BackendTimeout:
-            elapsed = time.monotonic() - started
-            LOG.warning("[PROXY] %s %s -> timeout in %.2fs", method, internal_path, elapsed)
-            self.unavailable(504)
-            return
-        except (OSError, http.client.HTTPException) as error:
-            elapsed = time.monotonic() - started
-            tls_detail = ""
-            if isinstance(error, ssl.SSLCertVerificationError):
-                tls_detail = (
-                    f" verify_code={error.verify_code}"
-                    f" verify_message={error.verify_message!r}"
-                )
-            LOG.warning(
-                "[PROXY] %s %s -> unavailable (%s%s) in %.2fs",
-                method,
-                internal_path,
-                type(error).__name__,
-                tls_detail,
-                elapsed,
-            )
-            self.unavailable(502)
-            return
-
-        elapsed = time.monotonic() - started
-        LOG.info("[PROXY] %s %s -> %s in %.2fs", method, internal_path, response.status, elapsed)
-        if cache_products and not query and response.status == 200 and not contains_internal_data(response.body):
-            PRODUCT_CACHE.put(api_key, response.body, safe_content_type(response.content_type))
-        self.send_backend_response(response)
-
-    def validated_order_body(self, body: bytes) -> bytes | None:
-        """Retain existing v1 validation while passing modern order JSON unchanged."""
-        try:
-            data = json.loads(body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            self.error(400, "invalid_json", "Request body must contain valid JSON.")
-            return None
-        if not isinstance(data, dict):
-            self.error(400, "invalid_order", "Request body must be a JSON object.")
-            return None
-
-        service_id = data.get("service_id", data.get("product_id"))
-        client_order_id = data.get("client_order_id", data.get("external_order_id"))
-        quantity = data.get("quantity", 1)
-        delivery_telegram_id = data.get("delivery_telegram_id")
-        try:
-            service_id = int(service_id)
-            quantity = int(quantity)
-            if delivery_telegram_id is not None:
-                delivery_telegram_id = int(delivery_telegram_id)
-        except (TypeError, ValueError):
-            self.error(400, "invalid_order", "service_id/product_id and quantity must be integers.")
-            return None
-        if service_id <= 0 or quantity <= 0:
-            self.error(400, "invalid_order", "service_id and quantity must be greater than zero.")
-            return None
-        if not client_order_id:
-            self.error(400, "invalid_order", "client_order_id or external_order_id is required.")
-            return None
-        if len(str(client_order_id)) > 80:
-            self.error(400, "invalid_order", "client_order_id is too long.")
-            return None
-        if delivery_telegram_id is not None and delivery_telegram_id <= 0:
-            self.error(400, "invalid_order", "delivery_telegram_id must be greater than zero.")
-            return None
-
-        # Modern requests retain their exact bytes.  For documented legacy field
-        # names, add the canonical field names expected by the Render API while
-        # preserving the supplied values and all extra fields.
-        if "service_id" in data and "client_order_id" in data:
-            return body
-        normalized = dict(data)
-        normalized.setdefault("service_id", service_id)
-        normalized.setdefault("client_order_id", str(client_order_id))
-        normalized.setdefault("quantity", quantity)
-        if delivery_telegram_id is not None:
-            normalized["delivery_telegram_id"] = delivery_telegram_id
-        return json_bytes(normalized)
-
-    def handle_v1(self, method: str) -> None:
-        parsed = urlsplit(self.path)
-        path = parsed.path
-        api_key = self.require_api_key()
-        if api_key is None:
-            return
-        if method == "GET":
-            if path == "/api/v1/products":
-                self.forward("GET", path, api_key, query=parsed.query, cache_products=True)
-                return
-            if path in {"/api/v1/me", "/api/v1/orders"}:
-                self.forward("GET", path, api_key, query=parsed.query)
-                return
-            if PUBLIC_V1_ORDER_PATH.fullmatch(path):
-                self.forward("GET", path, api_key, query=parsed.query)
-                return
-        elif method == "POST" and path == "/api/v1/order":
-            body = self.read_body()
-            if body is not None:
-                body = self.validated_order_body(body)
-            if body is not None:
-                self.forward("POST", path, api_key, body=body)
-            return
-        self.error(404, "not_found", "Endpoint not found.")
-
-    def handle_legacy(self, method: str) -> None:
-        parsed = urlsplit(self.path)
-        api_key = self.require_api_key()
-        if api_key is None:
-            return
-        action = parse_qs(parsed.query).get("action", [""])[0].lower()
-        if method == "GET":
-            routes = {"products": "/api/v1/products", "balance": "/api/v1/me", "orders": "/api/v1/orders"}
-            if action in routes:
-                self.forward("GET", routes[action], api_key, cache_products=action == "products")
-                return
-            if action == "order":
-                self.error(400, "invalid_request", "Use /api/reseller/orders/{order_id} for a single order.")
-                return
-            self.error(404, "invalid_action", "Use action=products, balance, or orders.")
-            return
-        if method == "POST" and action == "order":
-            body = self.read_body()
-            if body is not None:
-                body = self.validated_order_body(body)
-            if body is not None:
-                self.forward("POST", "/api/v1/order", api_key, body=body)
-            return
-        self.error(404, "invalid_action", "Invalid reseller action.")
-
-    def do_GET(self) -> None:
-        parsed = urlsplit(self.path)
-        path = parsed.path
-        if path == "/health":
-            self.send_json(200, {"status": "ok", "service": "RainDeals Reseller API"})
-        elif path == "/":
-            self.home()
-        elif path == "/docs":
-            self.docs()
-        elif path == "/openapi.json":
-            self.send_json(200, self.openapi_spec())
-        elif path.startswith("/api/v1/"):
-            self.handle_v1("GET")
-        elif path == "/api/reseller":
-            self.handle_legacy("GET")
-        elif path in {"/api/reseller/products", "/api/reseller/balance", "/api/reseller/orders"}:
-            action = {"/api/reseller/products": "products", "/api/reseller/balance": "balance", "/api/reseller/orders": "orders"}[path]
-            original = self.path
-            self.path = f"/api/reseller?action={action}"
-            try:
-                self.handle_legacy("GET")
-            finally:
-                self.path = original
-        elif match := PUBLIC_ORDER_PATH.fullmatch(path):
-            api_key = self.require_api_key()
-            if api_key is not None:
-                self.forward("GET", f"/api/v1/order/{match.group(1)}", api_key, query=parsed.query)
-        else:
-            self.error(404, "not_found", "Endpoint not found.")
-
-    def do_POST(self) -> None:
-        path = urlsplit(self.path).path
-        if path == "/api/v1/order":
-            self.handle_v1("POST")
-        elif path in {"/api/reseller", "/api/reseller/order"}:
-            self.handle_legacy("POST")
-        else:
-            self.error(404, "not_found", "Endpoint not found.")
-
-    def do_OPTIONS(self) -> None:
-        self.send_response(HTTPStatus.NO_CONTENT)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key")
-        self.send_header("Access-Control-Max-Age", "600")
-        self.send_header("Content-Length", "0")
-        self.end_headers()
-
-    def home(self) -> None:
-        page = """<!doctype html><html><head><meta charset=\"utf-8\"><title>RainDeals Bot Developer API</title></head><body><h1>RainDeals Bot Developer API</h1><p>Wasmer public reseller API gateway.</p><ul><li>GET /health</li><li>GET /api/v1/me</li><li>GET /api/v1/products</li><li>GET /api/v1/orders</li><li>GET /api/v1/order/{order_id}</li><li>POST /api/v1/order</li></ul><p>Open <a href=\"/docs\">/docs</a> for interactive API documentation.</p></body></html>"""
-        self.send_bytes(200, page.encode("utf-8"), "text/html; charset=utf-8")
-
-    def docs(self) -> None:
-        page = """<!doctype html><html><head><meta charset=\"utf-8\"><title>RainDeals Bot API</title><link rel=\"stylesheet\" href=\"https://unpkg.com/swagger-ui-dist@5/swagger-ui.css\"></head><body><div id=\"swagger-ui\"></div><script src=\"https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js\"></script><script>window.ui=SwaggerUIBundle({url:'/openapi.json',dom_id:'#swagger-ui',deepLinking:true,persistAuthorization:false,displayRequestDuration:true,tryItOutEnabled:true});</script></body></html>"""
-        self.send_bytes(200, page.encode("utf-8"), "text/html; charset=utf-8")
-
-    def openapi_spec(self) -> dict[str, Any]:
-        bearer = [{"ApiKey": []}]
-        responses = {"401": {"description": "Invalid API key"}}
-        return {
-            "openapi": "3.0.3",
-            "info": {"title": "RainDeals Bot Developer API", "version": "2.1.0", "description": "Use Authorization: Bearer YOUR_API_KEY."},
-            "servers": [{"url": "/"}],
-            "components": {"securitySchemes": {"ApiKey": {"type": "http", "scheme": "bearer", "bearerFormat": "AK_xxxxxxxxx"}}},
-            "paths": {
-                "/health": {"get": {"summary": "Health check", "responses": {"200": {"description": "OK"}}}},
-                "/api/v1/me": {"get": {"summary": "Get wallet/account", "security": bearer, "responses": {"200": {"description": "Account"}, **responses}}},
-                "/api/v1/products": {"get": {"summary": "List products", "security": bearer, "responses": {"200": {"description": "Products"}, **responses}}},
-                "/api/v1/orders": {"get": {"summary": "List orders", "security": bearer, "responses": {"200": {"description": "Orders"}, **responses}}},
-                "/api/v1/order/{order_id}": {"get": {"summary": "Get order", "security": bearer, "parameters": [{"name": "order_id", "in": "path", "required": True, "schema": {"type": "integer"}}], "responses": {"200": {"description": "Order"}, "404": {"description": "Order not found"}, **responses}}},
-                "/api/v1/order": {"post": {"summary": "Create order", "security": bearer, "requestBody": {"required": True, "content": {"application/json": {"schema": {"type": "object"}}}}, "responses": {"200": {"description": "Order created"}, "400": {"description": "Invalid order"}, "404": {"description": "Product not found"}, **responses}}},
-            },
-        }
-
-
-class GatewayServer(ThreadingHTTPServer):
-    daemon_threads = True
+    creator = ChatGPTCreator(api_key=api_key)
+    creator.run()
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
-    LOG.info("RainDeals Bot Wasmer Reseller API starting on %s:%s; backend configured=%s", HOST, PORT, configured())
-    GatewayServer((HOST, PORT), GatewayHandler).serve_forever()
+    main()

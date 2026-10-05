@@ -47,7 +47,7 @@ async def redeem_command(message: Message, state: FSMContext):
                 [
                     InlineKeyboardButton(
                         text="⬅ Cancel",
-                        callback_data="main_menu",
+                        callback_data="deposit_start",
                     )
                 ]
             ]
@@ -69,7 +69,7 @@ async def redeem_button(callback: CallbackQuery, state: FSMContext):
                 [
                     InlineKeyboardButton(
                         text="⬅ Cancel",
-                        callback_data="main_menu",
+                        callback_data="deposit_start",
                     )
                 ]
             ]

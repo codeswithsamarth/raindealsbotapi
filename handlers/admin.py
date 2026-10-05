@@ -1,5 +1,7 @@
 # handlers/admin.py — FIXED ADMIN PANEL WITH DASHBOARD, BROADCAST & FULL PROVIDER MANAGEMENT
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 from datetime import datetime
@@ -26,6 +28,7 @@ from config import ADMIN_IDS
 from models.user import User
 from models.product import Product
 from models.order import Order
+from models.deposit import Deposit
 from models.ticket import Ticket
 from models.provider import Provider
 from models.custom_rate import CustomRate
@@ -35,6 +38,7 @@ from keyboards.admin_menu import get_admin_panel
 from keyboards.menu import get_admin_main_menu
 
 from states.broadcast import BroadcastState
+from services.maintenance_mode import is_maintenance_enabled, set_maintenance_enabled
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -57,11 +61,19 @@ class ProviderSetupState(StatesGroup):
     waiting_api_type = State()
     waiting_auth_type = State()
     waiting_api_key = State()
+    waiting_api_secret = State()
     waiting_configuration = State()
 
 
 class ProviderEditState(StatesGroup):
     waiting_field_value = State()
+
+
+class MaintenanceModeState(StatesGroup):
+    waiting_password = State()
+
+
+MAINTENANCE_PASSWORD_HASH = "7aa5d3f5bbd51bdb5b8796decd7535ecf2a0b4944885c7dd81a543bcd7885585"
 
 
 ACTIVITY_PER_PAGE = 8
@@ -128,50 +140,100 @@ def _get_admin_panel_with_providers() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+@router.callback_query(F.data == "maintenance_mode")
+async def maintenance_mode_prompt(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Access denied.", show_alert=True)
+        return
+    await state.clear()
+    enabled = await asyncio.to_thread(is_maintenance_enabled)
+    status = "ON — user actions are blocked" if enabled else "OFF — the store is available"
+    await state.set_state(MaintenanceModeState.waiting_password)
+    await callback.message.answer(
+        f"🛠 <b>Maintenance Mode</b>\nStatus: <b>{status}</b>\n\n"
+        "Enter the maintenance password to continue.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="Cancel", callback_data="maintenance_cancel")
+        ]]),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "maintenance_cancel")
+async def maintenance_mode_cancel(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Access denied.", show_alert=True)
+        return
+    await state.clear()
+    await callback.message.answer("Maintenance mode change cancelled.")
+    await callback.answer()
+
+
+@router.message(MaintenanceModeState.waiting_password)
+async def maintenance_mode_password(message: Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        await state.clear()
+        return
+    password = (message.text or "").strip()
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    submitted_hash = hashlib.sha256(password.encode("utf-8")).hexdigest()
+    if not hmac.compare_digest(submitted_hash, MAINTENANCE_PASSWORD_HASH):
+        await state.clear()
+        await message.answer("❌ Incorrect password. No changes were made.")
+        return
+
+    await state.clear()
+    enabled = await asyncio.to_thread(is_maintenance_enabled)
+    target_enabled = not enabled
+    action = "enable" if target_enabled else "disable"
+    label = "Turn ON" if target_enabled else "Turn OFF"
+    await message.answer(
+        f"Password verified. Confirm to <b>{action}</b> maintenance mode?",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text=f"🛠 {label}", callback_data=f"maintenance_confirm_{int(target_enabled)}"),
+            InlineKeyboardButton(text="Cancel", callback_data="maintenance_cancel"),
+        ]]),
+    )
+
+
+@router.callback_query(F.data.in_({"maintenance_confirm_0", "maintenance_confirm_1"}))
+async def maintenance_mode_confirm(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Access denied.", show_alert=True)
+        return
+    enabled = callback.data.endswith("_1")
+    try:
+        await asyncio.to_thread(set_maintenance_enabled, enabled)
+    except Exception:
+        logger.exception("Failed to change maintenance mode")
+        await callback.answer("Could not save the setting. Please try again.", show_alert=True)
+        return
+    status = "enabled. Users will only see the maintenance notice." if enabled else "disabled. The store is available again."
+    await callback.message.edit_text(f"✅ Maintenance mode {status}")
+    await callback.answer("Maintenance setting saved.")
+
+
 # ╔══════════════════════════════════════════════════════════════╗
 # ║  ADMIN PANEL DASHBOARD — TERMINAL STYLE                     ║
 # ╚══════════════════════════════════════════════════════════════╝
 
 def _build_admin_dashboard(db, admin_name: str, admin_id: int) -> str:
-    """Build terminal-style admin control center."""
-    users = db.query(User).count()
+    """Build the compact admin welcome screen."""
     products = db.query(Product).count()
     orders = db.query(Order).count()
-    tickets = db.query(Ticket).count()
-
-    admin_user = db.query(User).filter(User.telegram_id == admin_id).first()
-    admin_balance = float(getattr(admin_user, 'balance_display', float(admin_user.balance or 0))) if admin_user else 0
-    admin_rewards = float(getattr(admin_user, 'referral_earnings_display', 0)) if admin_user else 0
-
-    total_revenue = db.query(func.coalesce(func.sum(Order.amount), 0)).scalar()
+    safe_admin_name = html_escape(admin_name or "Admin", quote=False)
 
     return (
-        "<code>┌──(root㉿Rain)-[/control]</code>\n"
-        "<code>└─# sudo Rain-admin --dashboard</code>\n"
-        "<code>[sudo] password:</code>\n"
-        "<code>************</code>\n"
-        "<code>[AUTH] Administrator Verified</code>\n"
-        "<code>[CORE] Control Center Online</code>\n"
-        "<code>[SYNC] Commerce Services Ready</code>\n"
-        "<code>[MONITOR] Live System Active</code>\n"
-        "<code>━━━━━━━━━━━━━━━━━━━━━━</code>\n"
-        "<code>CONTROL CENTER</code>\n"
-        f"<code>Admin       {admin_name}</code>\n"
-        f"<code>UID         {admin_id}</code>\n"
-        "<code>Privilege   Root</code>\n"
-        "<code>━━━━━━━━━━━━━━━━━━━━━━</code>\n"
-        "<code>LEDGER</code>\n"
-        f"<code>Balance     ${admin_balance:.2f}</code>\n"
-        f"<code>Rewards     ${admin_rewards:.2f}</code>\n"
-        f"<code>Revenue     ${float(total_revenue or 0):.2f}</code>\n"
-        "<code>━━━━━━━━━━━━━━━━━━━━━━</code>\n"
-        "<code>SYSTEM</code>\n"
-        f"<code>Orders      {orders}</code>\n"
-        "<code>Status      Operational</code>\n"
-        "<code>━━━━━━━━━━━━━━━━━━━━━━</code>\n"
-        "<code>Awaiting administrator command...</code>\n"
-        "<code>root@Rain:~#</code>\n\n"
-        "👇 <b>Choose an action:</b>"
+        "<blockquote>👑 <b>Product &amp; Provider Control</b></blockquote>\n"
+        f"Welcome, <b>{safe_admin_name}</b>!\n"
+        "Manage products, providers, fulfillment, and maintenance here.\n\n"
+        f"📦 Products: <b>{products}</b>  ·  🛍 Orders: <b>{orders}</b>\n\n"
+        "👇 <b>Choose a control below.</b>"
     )
 
 
@@ -184,7 +246,7 @@ def _load_admin_dashboard(admin_name: str, admin_id: int) -> str:
         db.close()
 
 
-def _load_admin_stats() -> tuple[int, int, int, int, object]:
+def _load_admin_stats() -> tuple[int, int, int, int, int, object]:
     """Fetch dashboard statistics in a worker thread, never on the event loop."""
     db = SessionLocal()
     try:
@@ -192,6 +254,7 @@ def _load_admin_stats() -> tuple[int, int, int, int, object]:
             db.query(User).count(),
             db.query(Product).count(),
             db.query(Order).count(),
+            db.query(Deposit).count(),
             db.query(Ticket).count(),
             db.query(func.coalesce(func.sum(Order.amount), 0)).scalar(),
         )
@@ -236,32 +299,43 @@ def _format_balance(raw_balance) -> str:
 
 def _build_user_dashboard(user) -> str:
     """Build terminal-style user dashboard with exact fractional balance display."""
+    balance_raw = getattr(user, 'balance_display', getattr(user, 'balance', 0))
+    balance_str = _format_balance(balance_raw)
+
     total_orders = int(getattr(user, 'total_orders', 0) or 0)
+    total_refs = int(getattr(user, 'total_referrals', 0) or 0)
     first_name = user.full_name.split()[0] if user.full_name else "user"
 
     return (
-        "🛍 Rain API\n"
-        "Product Ordering Interface\n\n"
+        "🛍 Rain Store\n"
+        "Premium Digital Marketplace\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         f"👋 Welcome back, {safe(first_name)}\n\n"
+        "💎 Standard Plan\n\n"
+        f"💰 Wallet: ${balance_str}\n"
         f"📦 Orders: {total_orders}\n"
-        "🔑 API-ready account\n\n"
+        f"🎁 Rewards: {total_refs}\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
 
         "<blockquote>"
-        "✓ Browse available products\n"
-        "✓ View product orders\n"
-        "✓ Create and manage API keys"
+        "✓ Verified Premium Products\n"
+        "✓ Instant Delivery\n"
+        "✓ Secure Payments\n"
+        "✓ Dedicated Customer Support"
         "</blockquote>\n\n"
 
         "━━━━━━━━━━━━━━━━━━━━\n\n"
 
         "<blockquote>"
-        "🛒 Products \"Browse the catalog\"\n"
-        "📦 Orders \"View product orders\"\n"
-        "🔑 API Access \"Manage your API key\""
+        "🛒 Shop \"Browse premium digital products\"\n"
+        "💰 Deposit \"Top up your wallet instantly\"\n"
+        "👤 Profile \"Manage your account & wallet\"\n"
+        "📦 Orders \"View purchases & product keys\"\n"
+        "📞 Support \"Get help from our support team\""
         "</blockquote>\n\n"
 
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "📢 Stay Updated: @Popeye7707\n\n"
         "👇 Tap a button below to get started."
     )
 
@@ -603,8 +677,9 @@ async def process_provider_api_type_cb(callback: CallbackQuery, state: FSMContex
             ],
             [
                 InlineKeyboardButton(text="query (URL Param)", callback_data="set_authtype_query"),
-                InlineKeyboardButton(text="api_key", callback_data="set_authtype_api_key")
+                InlineKeyboardButton(text="HMAC (Key + Secret)", callback_data="set_authtype_hmac")
             ],
+            [InlineKeyboardButton(text="WmEmail Open (API Key)", callback_data="set_authtype_wmemail_open")],
             [InlineKeyboardButton(text="❌ Cancel", callback_data="admin_provider_cancel")]
         ]
     )
@@ -638,8 +713,9 @@ async def process_provider_api_type_msg(message: Message, state: FSMContext):
             ],
             [
                 InlineKeyboardButton(text="query (URL Param)", callback_data="set_authtype_query"),
-                InlineKeyboardButton(text="api_key", callback_data="set_authtype_api_key")
+                InlineKeyboardButton(text="HMAC (Key + Secret)", callback_data="set_authtype_hmac")
             ],
+            [InlineKeyboardButton(text="WmEmail Open (API Key)", callback_data="set_authtype_wmemail_open")],
             [InlineKeyboardButton(text="❌ Cancel", callback_data="admin_provider_cancel")]
         ]
     )
@@ -709,6 +785,22 @@ async def process_provider_api_key(message: Message, state: FSMContext):
     api_key = None if raw_key.lower() in ("none", "skip", "") else raw_key
 
     await state.update_data(api_key=api_key)
+    data = await state.get_data()
+    if data.get("auth_type") == "hmac":
+        if not api_key:
+            await message.answer("HMAC authentication requires an API key.")
+            return
+
+        await state.set_state(ProviderSetupState.waiting_api_secret)
+        await message.answer(
+            "API key saved securely. Send the API secret for this provider.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="Cancel", callback_data="admin_provider_cancel")]]
+            ),
+        )
+        return
+
+    await state.update_data(api_secret=None)
     await state.set_state(ProviderSetupState.waiting_configuration)
 
     await message.answer(
@@ -720,6 +812,31 @@ async def process_provider_api_key(message: Message, state: FSMContext):
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[[InlineKeyboardButton(text="⏩ Skip Configuration", callback_data="skip_provider_config")]]
         )
+    )
+
+
+@router.message(ProviderSetupState.waiting_api_secret)
+async def process_provider_api_secret(message: Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        await state.clear()
+        return
+
+    api_secret = (message.text or "").strip()
+    if not api_secret or api_secret.lower() in ("none", "skip"):
+        await message.answer("HMAC authentication requires an API secret.")
+        return
+
+    await state.update_data(api_secret=api_secret)
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    await state.set_state(ProviderSetupState.waiting_configuration)
+    await message.answer(
+        "API secret saved securely. Send optional JSON configuration or send skip.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="Skip Configuration", callback_data="skip_provider_config")]]
+        ),
     )
 
 
@@ -766,6 +883,7 @@ async def show_provider_preview(target: Message | CallbackQuery, state: FSMConte
         f"<b>API Type:</b> <code>{safe(data.get('api_type', 'generic'))}</code>\n"
         f"<b>Auth Type:</b> <code>{safe(data.get('auth_type', 'api_key'))}</code>\n"
         f"<b>API Key:</b> ********\n"
+        f"<b>API Secret:</b> {'********' if data.get('api_secret') else 'Not used'}\n"
         f"<b>Configuration:</b> <code>{safe(data.get('configuration') or 'None')}</code>\n\n"
         "Save this provider?"
     )
@@ -793,6 +911,10 @@ async def save_provider_to_db(callback: CallbackQuery, state: FSMContext):
         return
 
     data = await state.get_data()
+    if data.get("auth_type") == "hmac" and not data.get("api_secret"):
+        await callback.answer("HMAC authentication requires an API secret.", show_alert=True)
+        return
+
     db = SessionLocal()
     try:
         provider = Provider(
@@ -802,6 +924,7 @@ async def save_provider_to_db(callback: CallbackQuery, state: FSMContext):
             api_type=data.get("api_type", "generic"),
             auth_type=data.get("auth_type", "api_key"),
             api_key=data.get("api_key"),
+            api_secret=data.get("api_secret"),
             configuration=data.get("configuration"),
             is_active=True,
         )
@@ -978,7 +1101,8 @@ async def edit_provider_menu(callback: CallbackQuery, state: FSMContext):
             f"<b>Base URL:</b> <code>{safe(p.base_url)}</code>\n"
             f"<b>API Type:</b> <code>{safe(p.api_type)}</code>\n"
             f"<b>Auth Type:</b> <code>{safe(p.auth_type)}</code>\n"
-            f"<b>API Key:</b> ********\n\n"
+            f"<b>API Key:</b> ********\n"
+            f"<b>API Secret:</b> {'********' if p.api_secret else 'Not used'}\n\n"
             "Select a field to edit:"
         )
 
@@ -994,8 +1118,9 @@ async def edit_provider_menu(callback: CallbackQuery, state: FSMContext):
                 ],
                 [
                     InlineKeyboardButton(text="API Key / Token", callback_data=f"pedit_field_api_key_{p.id}"),
-                    InlineKeyboardButton(text="Configuration", callback_data=f"pedit_field_configuration_{p.id}")
+                    InlineKeyboardButton(text="API Secret", callback_data=f"pedit_field_api_secret_{p.id}")
                 ],
+                [InlineKeyboardButton(text="Configuration", callback_data=f"pedit_field_configuration_{p.id}")],
                 [InlineKeyboardButton(text="⬅️ Back", callback_data="admin_provider_list")]
             ]
         )
@@ -1021,8 +1146,8 @@ async def prompt_edit_provider_field(callback: CallbackQuery, state: FSMContext)
     await state.set_state(ProviderEditState.waiting_field_value)
 
     prompt = f"Send the new value for <b>{field_name}</b>:"
-    if field_name == "api_key":
-        prompt += "\n\n<i>Current API key is hidden. Send a new key to update or 'keep' to keep existing.</i>"
+    if field_name in ("api_key", "api_secret"):
+        prompt += "\n\n<i>Current credential is hidden. Send a new value or 'keep' to keep it unchanged.</i>"
 
     await _safe_edit_text(
         callback.message,
@@ -1045,7 +1170,25 @@ async def process_edit_provider_field_save(message: Message, state: FSMContext):
     field_name = data.get("edit_field")
     new_val = (message.text or "").strip()
 
-    if field_name == "api_key" and new_val.lower() == "keep":
+    if field_name == "auth_type" and new_val.lower() in {
+        "hmac", "hmac_sha256", "dujiao_hmac", "dujiao-next", "dujiao_next", "signature"
+    }:
+        db = SessionLocal()
+        try:
+            provider = db.query(Provider).filter(Provider.id == provider_id).first()
+            if provider and not provider.api_secret:
+                await message.answer("Add the provider API secret before switching to HMAC authentication.")
+                return
+        finally:
+            db.close()
+
+    if field_name in ("api_key", "api_secret"):
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
+    if field_name in ("api_key", "api_secret") and new_val.lower() == "keep":
         await state.clear()
         await message.answer("Existing API key kept.", reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[[InlineKeyboardButton(text="📋 Provider List", callback_data="admin_provider_list")]]))
@@ -1149,6 +1292,7 @@ async def view_user(callback: CallbackQuery):
             "────────────────────────────\n"
             f"🛒 <b>Orders:</b> {user.total_orders}\n"
             f"💸 <b>Total Spent:</b> ${float(user.total_spent):.2f}\n"
+            f"📥 <b>Total Deposited:</b> ${float(user.total_deposited):.2f}\n\n"
             "────────────────────────────\n"
             f"🚫 <b>Banned:</b> {'<b>YES</b> 🚫' if user.is_banned else 'No 🟢'}"
         )
@@ -1173,6 +1317,10 @@ async def view_user(callback: CallbackQuery):
                         InlineKeyboardButton(
                             text="🛒 Purchase History",
                             callback_data=f"user_orders_{user.id}_0"
+                        ),
+                        InlineKeyboardButton(
+                            text="📥 Deposit History",
+                            callback_data=f"user_deposits_{user.id}_0"
                         )
                     ],
                     [
@@ -1233,7 +1381,7 @@ async def admin_products(callback: CallbackQuery):
 
 @router.callback_query(F.data == "admin_stats")
 async def admin_stats(callback: CallbackQuery):
-    users, products, orders, tickets, revenue = await asyncio.to_thread(
+    users, products, orders, deposits, tickets, revenue = await asyncio.to_thread(
         _load_admin_stats
     )
 
@@ -1244,6 +1392,7 @@ async def admin_stats(callback: CallbackQuery):
         f"👥 <b>Users:</b> {users}\n"
         f"📦 <b>Products:</b> {products}\n"
         f"🛒 <b>Orders:</b> {orders}\n"
+        f"💰 <b>Deposits:</b> {deposits}\n"
         f"🎫 <b>Tickets:</b> {tickets}\n\n"
         "════════════════════════════\n"
         f"💵 <b>Revenue:</b> ${float(revenue or 0):.2f}"
@@ -1463,21 +1612,19 @@ async def send_broadcast(message: Message, state: FSMContext):
 
 
 # =====================================================
-# BACK TO USER PANEL — Terminal style, NO popup
+# BACK TO USER MENU
 # =====================================================
 
 @router.callback_query(F.data == "admin_back")
-async def admin_back(callback: CallbackQuery):
-    """Back to user dashboard — terminal style, edits current message with exact balance."""
-    text = await asyncio.to_thread(_load_user_dashboard_text, callback.from_user.id)
-    if not text:
-        await callback.answer("User not found.", show_alert=True)
-        return
+async def admin_back(callback: CallbackQuery, state: FSMContext):
+    """Replace the admin panel with the current lightweight start menu."""
+    await state.clear()
+
     await _safe_edit_text(
         callback.message,
-        text,
+        "<blockquote>🛍 <b>Welcome to Rain Store Bot!</b></blockquote>",
         reply_markup=get_admin_main_menu(),
-        parse_mode="HTML"
+        parse_mode="HTML",
     )
     await callback.answer()
 
@@ -1599,6 +1746,45 @@ async def user_orders(callback: CallbackQuery):
             nav.append(InlineKeyboardButton(text="⬅ Previous", callback_data=f"user_orders_{user_id}_{page - 1}"))
         if (page + 1) * ACTIVITY_PER_PAGE < total:
             nav.append(InlineKeyboardButton(text="Next ➡", callback_data=f"user_orders_{user_id}_{page + 1}"))
+        rows = [nav] if nav else []
+        rows.append([InlineKeyboardButton(text="🔙 User Details", callback_data=f"view_user_{user_id}")])
+        await _safe_edit_text(callback.message, "\n".join(lines), parse_mode="HTML",
+                              reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    finally:
+        db.close()
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("user_deposits_"))
+async def user_deposits(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Access denied.", show_alert=True)
+        return
+    _, _, user_id, page = callback.data.split("_")
+    user_id, page = int(user_id), int(page)
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            await callback.answer("User not found.", show_alert=True)
+            return
+        query = db.query(Deposit).filter(Deposit.telegram_id == user.telegram_id).order_by(Deposit.created_at.desc())
+        total = query.count()
+        deposits = query.offset(page * ACTIVITY_PER_PAGE).limit(ACTIVITY_PER_PAGE).all()
+        lines = [f"📥 <b>Deposit History</b>\n👤 {safe(user.full_name)}\n<i>{total} deposit(s)</i>\n"]
+        for deposit in deposits:
+            lines.append(
+                f"<b>#{deposit.id}</b> {_money(getattr(deposit, 'amount', Decimal('0')))}\n"
+                f"Status: {safe(str(getattr(deposit, 'status', 'completed')).replace('_', ' ').title())} • "
+                f"{deposit.created_at.strftime('%d %b %Y, %H:%M')}\n"
+            )
+        if not deposits:
+            lines.append("No deposits found.")
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(text="⬅ Previous", callback_data=f"user_deposits_{user_id}_{page - 1}"))
+        if (page + 1) * ACTIVITY_PER_PAGE < total:
+            nav.append(InlineKeyboardButton(text="Next ➡", callback_data=f"user_deposits_{user_id}_{page + 1}"))
         rows = [nav] if nav else []
         rows.append([InlineKeyboardButton(text="🔙 User Details", callback_data=f"view_user_{user_id}")])
         await _safe_edit_text(callback.message, "\n".join(lines), parse_mode="HTML",

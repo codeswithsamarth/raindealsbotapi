@@ -10,6 +10,10 @@ from aiohttp import web
 
 from bot_app import bot, dp
 
+from services.order_notifications import order_notification_loop
+from services.product_api_access import ensure_product_api_access_schema
+from services.provider_schema import ensure_provider_schema
+from services.maintenance_mode import ensure_maintenance_schema
 
 
 # ============================================================
@@ -85,11 +89,25 @@ async def main():
 
     runner = None
 
+    order_notification_task = None
+
     # --------------------------------------------------------
     # HTTP SERVER
     # --------------------------------------------------------
 
     runner = await start_http_server()
+
+    await asyncio.to_thread(ensure_product_api_access_schema)
+    await asyncio.to_thread(ensure_provider_schema)
+    await asyncio.to_thread(ensure_maintenance_schema)
+
+    order_notification_task = asyncio.create_task(
+        order_notification_loop(bot)
+    )
+
+    logger.info(
+        "Admin order notification service started"
+    )
 
     # --------------------------------------------------------
     # BOT INFO
@@ -121,6 +139,18 @@ async def main():
         )
 
     finally:
+
+        if order_notification_task and not order_notification_task.done():
+
+            order_notification_task.cancel()
+
+            try:
+
+                await order_notification_task
+
+            except asyncio.CancelledError:
+
+                pass
 
         if runner:
 
@@ -163,3 +193,5 @@ if __name__ == "__main__":
             "FATAL ERROR: %s",
             exc,
         )
+
+
