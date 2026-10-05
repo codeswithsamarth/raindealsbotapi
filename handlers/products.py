@@ -719,6 +719,20 @@ def _fetch_products_by_ids(product_ids: list[int]) -> list:
         db.close()
 
 
+def _fetch_free_products() -> list:
+    """Fetch all active products with price = 0 (freebies)."""
+    db = SessionLocal()
+    try:
+        return (
+            db.query(Product)
+            .filter(Product.is_active == True, Product.price == 0)
+            .order_by(Product.id.asc())
+            .all()
+        )
+    finally:
+        db.close()
+
+
 def _accounts(product) -> list[str]:
     if not product.file_content:
         return []
@@ -997,6 +1011,74 @@ async def notify_new_product(bot, product):
 
 
 # ╔══════════════════════════════════════════════════════════════╗
+# ║              FREEBIES MENU                                   ║
+# ╚══════════════════════════════════════════════════════════════╝
+
+@router.callback_query(F.data == "freebies_menu")
+async def freebies_menu(callback: CallbackQuery):
+    await callback.answer()
+
+    await _refresh_reseller_stock_cache_if_needed()
+    products = await asyncio.to_thread(_fetch_free_products)
+
+    if not products:
+        await show(
+            callback,
+            (
+                f"🎁 <b>FREEBIES</b>\n\n"
+                f"📭 <b>No free products available right now.</b>\n\n"
+                f"{_divider('─', 28)}\n\n"
+                f"💡 Check back later — free products\n"
+                f"are added regularly!\n\n"
+                f"<i>Stay tuned for giveaways 🎉</i>"
+            ),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="🛍 Browse Paid Products", callback_data="products_menu",
+                                          style="primary")],
+                    [InlineKeyboardButton(text="🏠 Main Menu", callback_data="main_menu", style="primary")]
+                ]
+            ),
+        )
+        return
+
+    _fire_stock_scan(callback.bot, products)
+
+    text = (
+        f"🎁 <b>FREEBIES</b>\n\n"
+        f"<b>🎉 Free Products Available!</b>\n\n"
+        f"{_divider('─', 28)}\n"
+        f"<b>📊 Total Free Items:</b> {len(products)}\n\n"
+        f"{_divider('─', 28)}\n\n"
+        f"<b>👇 Grab your free product below:</b>\n"
+        f"<i>Tap any item to claim it — no payment needed!</i>"
+    )
+
+    keyboard = []
+    for p in products:
+        cat_config = _get_category_config(p.category)
+        stock = _real_stock(p)
+        stock_badge = "🔴 OOS" if stock <= 0 else (
+            f"🟢 In Stock" if stock >= 999999 else (f"🟡 {stock}" if stock <= 3 else f"🟢 {stock}"))
+
+        keyboard.append([
+            InlineKeyboardButton(
+                text=f"{p.icon or cat_config['icon']} {p.name} — FREE! 🎁 | {stock_badge}",
+                callback_data=f"product_{p.id}",
+                style=cat_config["style"],
+            )
+        ])
+
+    keyboard.append([
+        InlineKeyboardButton(text="🛍 Browse Paid Products", callback_data="products_menu", style="primary"),
+        InlineKeyboardButton(text="🏠 Main Menu", callback_data="main_menu", style="primary"),
+    ])
+
+    await show(callback, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+
+
+# ╔══════════════════════════════════════════════════════════════╗
 # ║              PRODUCTS MENU (PAID ONLY)                       ║
 # ╚══════════════════════════════════════════════════════════════╝
 
@@ -1047,7 +1129,7 @@ async def _show_products_catalog(callback: CallbackQuery, products: list):
 
         keyboard.append([
             InlineKeyboardButton(
-                text=f"{p.icon or cat_config['icon']} {p.name} — ${price:.2f}{custom_badge}{bulk_badge} | {stock_badge}",
+                text=f"#{p.id} {p.icon or cat_config['icon']} {p.name} — ${price:.2f}{custom_badge}{bulk_badge} | {stock_badge}",
                 callback_data=f"product_{p.id}",
                 style=cat_config["style"],
             )
@@ -1458,6 +1540,7 @@ async def product_info(callback: CallbackQuery | Message, linked_product_id: int
         f"<blockquote>{description_block}</blockquote>\n\n"
         f"{_divider('─', 28)}\n\n"
         f"<b>📊 Product Info:</b>\n"
+        f"  🆔 <b>Product ID:</b> <code>{product.id}</code>\n"
     )
 
     if is_free:
@@ -1525,6 +1608,7 @@ async def product_info(callback: CallbackQuery | Message, linked_product_id: int
 
     buttons.append([
         InlineKeyboardButton(text="🛍 All Products", callback_data="products_menu", style=cat_config["style"]),
+        InlineKeyboardButton(text="📜 My Orders", callback_data="orders_menu", style="primary"),
     ])
     buttons.append([
         InlineKeyboardButton(text="🔍 Search", callback_data="search_start", style="primary"),
@@ -2219,7 +2303,8 @@ async def show_delivery_instruction(callback: CallbackQuery):
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="🛍 Buy More", callback_data="products_menu", style="primary")],
+                [InlineKeyboardButton(text="📜 View Orders", callback_data="orders_menu", style="success"),
+                 InlineKeyboardButton(text="🛍 Buy More", callback_data="products_menu", style="primary")],
                 [InlineKeyboardButton(text="🏠 Main Menu", callback_data="main_menu", style="primary")]
             ]
         )
@@ -2277,10 +2362,10 @@ async def confirm_buy(callback: CallbackQuery, state: FSMContext):
             return
         except Exception:
             logger.exception("Unexpected error during purchase")
-            await show(callback, f"❌ <b>Unexpected Error</b>\n\nPlease try again later.",
+            await show(callback, f"❌ <b>Unexpected Error</b>\n\nPlease try again or contact support.",
                        parse_mode="HTML",
                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                           [InlineKeyboardButton(text="🛍 Products", callback_data="products_menu", style="primary"),
+                           [InlineKeyboardButton(text="🆘 Support", callback_data="support_menu", style="danger"),
                             InlineKeyboardButton(text="🏠 Main Menu", callback_data="main_menu", style="primary")]
                        ]))
             return
@@ -2305,10 +2390,26 @@ async def confirm_buy(callback: CallbackQuery, state: FSMContext):
                     f"   💰 <b>Cost:</b> <code>${total_price:.2f}</code>\n"
                     f"   💳 <b>Your Balance:</b> <code>${balance:.2f}</code>\n\n"
                     f"{'─' * 30}\n\n"
-                    f"💡 Please contact the administrator to add balance, or browse a lower-priced product."
+                    f"💡 <b>What would you like to do?</b>\n\n"
+                    f"   🏦 <b>Deposit Funds</b> — Add money to\n"
+                    f"      your wallet and try again.\n\n"
+                    f"   🛍 <b>Browse Products</b> — Find\n"
+                    f"      something within your budget.\n\n"
+                    f"   🏠 <b>Main Menu</b> — Go back to\n"
+                    f"      the dashboard.\n\n"
+                    f"{'─' * 30}\n\n"
+                    f"⚡ <i>Quick Tip: Top up your balance\n"
+                    f"with crypto or fiat in seconds!</i>"
                 )
                 reply_markup = InlineKeyboardMarkup(
                     inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="🏦 💰 Deposit Funds Now",
+                                callback_data="deposit_start",
+                                style="success"
+                            )
+                        ],
                         [
                             InlineKeyboardButton(
                                 text="🛍 Browse Other Products",
@@ -2332,11 +2433,17 @@ async def confirm_buy(callback: CallbackQuery, state: FSMContext):
                     f"╚{'═' * 30}╝\n\n"
                     f"⚠️ <b>{_esc(error_msg)}</b>\n\n"
                     f"{'─' * 30}\n\n"
-                    f"💡 <i>Please try again later.</i>"
+                    f"💡 <i>If you need help, contact\n"
+                    f"our support team anytime!</i>"
                 )
                 reply_markup = InlineKeyboardMarkup(
                     inline_keyboard=[
                         [
+                            InlineKeyboardButton(
+                                text="💳 Deposit Funds",
+                                callback_data="deposit_start",
+                                style="success"
+                            ),
                             InlineKeyboardButton(
                                 text="🛍 Browse Products",
                                 callback_data="products_menu",
@@ -2402,6 +2509,14 @@ async def confirm_buy(callback: CallbackQuery, state: FSMContext):
                     )
                 ])
             buttons.append([
+                InlineKeyboardButton(
+                    text="⭐ Rate This Purchase",
+                    callback_data=f"order_rate_{order_id}",
+                    style="success",
+                )
+            ])
+            buttons.append([
+                InlineKeyboardButton(text="📜 View Orders", callback_data="orders_menu", style="success"),
                 InlineKeyboardButton(text="🛍 Buy More", callback_data="products_menu", style="primary")
             ])
             buttons.append([
@@ -2495,7 +2610,8 @@ async def confirm_buy(callback: CallbackQuery, state: FSMContext):
                     f"<i>We'll notify you when it's ready! 🔔</i>"
                 )
             reply_markup = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🛍 Browse Products", callback_data="products_menu", style="success")],
+                [InlineKeyboardButton(text="📜 Track Order", callback_data="orders_menu", style="primary"),
+                 InlineKeyboardButton(text="🛍 Browse Products", callback_data="products_menu", style="success")],
                 [InlineKeyboardButton(text="🏠 Main Menu", callback_data="main_menu", style="primary")]
             ])
         else:
@@ -2541,7 +2657,8 @@ async def confirm_buy(callback: CallbackQuery, state: FSMContext):
                 )
 
             pending_buttons = [
-                [InlineKeyboardButton(text="🛍 Browse Products", callback_data="products_menu", style="primary")],
+                [InlineKeyboardButton(text="📜 Track Order", callback_data="orders_menu", style="primary"),
+                 InlineKeyboardButton(text="🆘 Support", callback_data="support_menu", style="danger")],
             ]
             if has_instr:
                 pending_buttons.insert(0, [
